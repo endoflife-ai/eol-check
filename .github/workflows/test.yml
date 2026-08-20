@@ -1,0 +1,33 @@
+name: self-test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Run against the fixtures (nodejs:18 EOL, postgres:14 approaching) in
+      # report-only mode, then assert the counts came back right.
+      - id: check
+        uses: ./
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}/fixtures
+        with:
+          fail-on: 'never'
+          products: 'nodejs:24'
+      - name: assert
+        run: |
+          echo "eol=${{ steps.check.outputs.eol-count }} approaching=${{ steps.check.outputs.approaching-count }} checked=${{ steps.check.outputs.checked-count }}"
+          test "${{ steps.check.outputs.eol-count }}" -ge 1
+          test "${{ steps.check.outputs.checked-count }}" -ge 3
+      # And prove the failure path actually fails.
+      - id: mustfail
+        uses: ./
+        continue-on-error: true
+        with:
+          scan: 'false'
+          products: 'nodejs:16'
+      - name: assert failure path
+        run: test "${{ steps.mustfail.outcome }}" = "failure"

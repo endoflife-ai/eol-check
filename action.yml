@@ -1,0 +1,38 @@
+name: 'EOL Check — end-of-life software gate'
+description: 'Fail CI when your stack runs end-of-life software. Auto-detects runtimes from .nvmrc, Dockerfiles, go.mod and more. Powered by endoflife.ai.'
+author: 'endoflife.ai'
+branding:
+  icon: 'alert-octagon'
+  color: 'red'
+
+inputs:
+  products:
+    description: 'Extra products to check, comma-separated as "slug:version" (e.g. "postgresql:14, nodejs:18"). Slugs are endoflife.ai product slugs.'
+    required: false
+    default: ''
+  scan:
+    description: 'Auto-detect versions from repo files (.nvmrc, .node-version, .python-version, .ruby-version, go.mod, package.json engines, Dockerfiles). "true" or "false".'
+    required: false
+    default: 'true'
+  fail-on:
+    description: 'When to fail the job: "eol" (something is past end of life), "approaching" (also fail when EOL is within warn-days), or "never" (report only).'
+    required: false
+    default: 'eol'
+  warn-days:
+    description: 'Warn (annotate) when a product reaches end of life within this many days.'
+    required: false
+    default: '90'
+
+outputs:
+  eol-count:
+    description: 'Number of detected products already past end of life.'
+  approaching-count:
+    description: 'Number of detected products reaching end of life within warn-days.'
+  checked-count:
+    description: 'Total product/version pairs checked.'
+  report:
+    description: 'Markdown report of every finding.'
+
+runs:
+  using: 'node20'
+  main: 'index.js'
