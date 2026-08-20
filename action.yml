@@ -1,5 +1,5 @@
 name: 'EOL Check — end-of-life software gate'
-description: 'Fail CI when your stack runs end-of-life software. Auto-detects runtimes from .nvmrc, Dockerfiles, go.mod and more. Powered by endoflife.ai.'
+description: 'Fail CI when your stack runs end-of-life software. Auto-detects runtimes and Docker base images. Data: endoflife.ai.'
 author: 'endoflife.ai'
 branding:
   icon: 'alert-octagon'
