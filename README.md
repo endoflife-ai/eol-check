@@ -72,6 +72,31 @@ costs the same as a 3-component one and never hits a rate limit. Versions
 resolve to the tracked release line (exact cycle, else major.minor, else
 major — never a prefix match, never a newest-cycle fallback).
 
+### Enriched SBOM out
+
+Add `sbom-output` and the action writes your document back with the verdict on
+every component — CycloneDX `properties` (or SPDX annotations) in the
+`endoflife:` namespace: `status`, `product`, `cycle`, `eol_date`,
+`days_until_eol` / `days_past_eol`, `purl_matched`, `matched_by`, `score_url`,
+and `status=not-tracked` with a reason where we have no verdict; plus a
+document-level summary (counts, unique products, the `gate` verdict) and a
+`metadata.tools` entry. Serial numbers, bom-refs, hashes and licenses are
+untouched. It is the same schema the API's
+[`POST /v1/sbom?enrich=1`](https://endoflife.ai/sbom-enrichment.json) produces,
+minus risk scores, so the file drops straight into Dependency-Track or a
+release's assets.
+
+```yaml
+- uses: endoflife-ai/eol-check@v1
+  with:
+    sbom: sbom.cdx.json
+    sbom-output: sbom.enriched.cdx.json
+- uses: actions/upload-artifact@v4
+  with:
+    name: sbom-enriched
+    path: sbom.enriched.cdx.json
+```
+
 | Product | Status | EOL date | Found in |
 |---|---|---|---|
 | nodejs 16 | 🔴 EOL | 2023-09-11 | sbom.cdx.json · pkg:docker/library/node@16.20.2 |
@@ -87,6 +112,7 @@ major — never a prefix match, never a newest-cycle fallback).
 | `products` | `''` | Extra `slug:version` pairs, comma-separated |
 | `scan` | `true` | Auto-detect from repo files |
 | `sbom` | `''` | CycloneDX / SPDX JSON file(s), comma-separated — see SBOM mode |
+| `sbom-output` | `''` | Write the enriched SBOM(s) here — a file, or a directory with a trailing slash |
 | `fail-on` | `eol` | `eol` \| `approaching` \| `never` |
 | `warn-days` | `90` | Warn when EOL is within this many days |
 

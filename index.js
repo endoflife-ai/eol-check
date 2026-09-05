@@ -10,7 +10,8 @@ const API = 'https://api.endoflife.ai/v1/status';
 // gate) — one download, no per-component API calls, no rate limit, so a
 // 3,000-component SBOM costs the same as a 3-component one.
 const SCANNER_DB = 'https://endoflife.ai/scanner-db.json';
-const UA = 'eol-check-action/1.1 (+https://github.com/endoflife-ai/eol-check)';
+const UA = 'eol-check-action/1.2 (+https://github.com/endoflife-ai/eol-check)';
+const ACTION_VERSION = '1.2.0';
 
 const input = (name, dflt) => {
   const v = process.env['INPUT_' + name.replace(/ /g, '_').toUpperCase()];
@@ -153,7 +154,7 @@ function parseSbom(doc) {
     const walk = (list) => {
       for (const c of list || []) {
         if (!c || typeof c !== 'object') continue;
-        comps.push({ name: c.name || '', version: c.version || '', purl: c.purl || '' });
+        comps.push({ name: c.name || '', version: c.version || '', purl: c.purl || '', ref: c });
         if (Array.isArray(c.components)) walk(c.components);
       }
     };
@@ -165,7 +166,7 @@ function parseSbom(doc) {
     for (const p of doc.packages || []) {
       if (!p || typeof p !== 'object') continue;
       const ref = (p.externalRefs || []).find((r) => r && r.referenceType === 'purl' && r.referenceLocator);
-      comps.push({ name: p.name || '', version: p.versionInfo || '', purl: ref ? ref.referenceLocator : '' });
+      comps.push({ name: p.name || '', version: p.versionInfo || '', purl: ref ? ref.referenceLocator : '', ref: p });
     }
     return { format: 'SPDX', components: comps };
   }
@@ -200,6 +201,7 @@ async function loadScannerDb() {
   if (!res.ok) throw new Error(`scanner-db.json HTTP ${res.status}`);
   const db = await res.json();
   if (!db || !db.products || typeof db.products !== 'object') throw new Error('scanner-db.json: unexpected shape');
+  loadScannerDb.generated = typeof db.generated === 'string' ? db.generated.slice(0, 10) : undefined;
   return db.products;
 }
 
@@ -226,34 +228,99 @@ function checkSbomFile(file, text, products, purlLookup, nameLookup) {
   const parsed = parseSbom(doc);
   if (parsed.error) return { error: parsed.error };
   const results = [], unmatched = [], seen = new Set();
+  const annotations = []; // one per parsed component, same schema as the API's enrich mode
+  const pt = (purl) => { const m = /^pkg:([A-Za-z0-9.+-]+)\//.exec(String(purl || '')); return m ? m[1].toLowerCase() : undefined; };
   for (const c of parsed.components) {
     let slug = null, how = null;
     if (c.purl) { const k = normalisePurl(c.purl); slug = k && purlLookup[k] ? purlLookup[k] : null; how = 'purl'; }
     else if (c.name) { slug = nameLookup[String(c.name).toLowerCase()] || null; how = 'name'; }
     const label = c.purl || (c.name ? c.name + (c.version ? '@' + c.version : '') : '(unnamed component)');
-    if (!slug) { unmatched.push(label); continue; }
+    const purlMatched = c.purl ? normalisePurl(c.purl) || undefined : undefined;
+    if (!slug) { unmatched.push(label); annotations.push({ status: 'not-tracked', reason: c.purl ? 'purl not tracked' : 'name not recognised' }); continue; }
     const version = (c.purl && purlVersion(c.purl)) || c.version || '';
     const cycle = findBestCycle(products[slug].cycles, version);
-    if (!cycle) { unmatched.push(`${label} (version not tracked)`); continue; }
-    const key = slug + ':' + cycle.c;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (!cycle) { unmatched.push(`${label} (version not tracked)`); annotations.push({ status: 'version-not-tracked', product: slug, product_url: `https://endoflife.ai/${slug}`, matched_by: how, purl_matched: purlMatched, purl_type: pt(c.purl), reason: version ? 'Version not tracked' : 'No version in SBOM' }); continue; }
     // Status is what the build published (cycle.s), never re-derived from the
     // eol boolean; a dated cycle also gets day counts from its date.
     const dated = typeof cycle.eol === 'string' && /^\d{4}-\d{2}-\d{2}/.test(cycle.eol);
     const days = dated ? daysUntil(cycle.eol.slice(0, 10)) : null;
     const isEol = cycle.s === 'eol' || (days != null && days < 0);
-    results.push({
+    const row = {
       slug, version: String(cycle.c), file, component: label, matched_by: how,
       is_eol: isEol,
-      eol_date: dated ? cycle.eol.slice(0, 10) : (cycle.eol === true ? null : null),
+      eol_date: dated ? cycle.eol.slice(0, 10) : null,
       eol_unpublished: cycle.eol === true,
       days_past_eol: isEol && days != null ? -days : null,
       days_until_eol: !isEol && days != null ? days : null,
       score_url: `https://endoflife.ai/score/${slug}/${cycle.c}`,
+    };
+    annotations.push({
+      status: isEol ? 'eol' : (cycle.s === 'warn' ? 'warn' : 'active'),
+      product: slug, product_url: `https://endoflife.ai/${slug}`, cycle: String(cycle.c),
+      eol_date: row.eol_date, eol_date_published: cycle.eol === true ? false : undefined,
+      days_until_eol: row.days_until_eol, days_past_eol: row.days_past_eol,
+      matched_by: how, purl_matched: purlMatched, purl_type: pt(c.purl), score_url: row.score_url, scored: false,
     });
+    const key = slug + ':' + cycle.c;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push(row);
   }
-  return { format: parsed.format, components: parsed.components.length, results, unmatched };
+  return { format: parsed.format, components: parsed.components.length, results, unmatched, parsed, annotations, doc };
+}
+
+// ── Enriched SBOM output ─────────────────────────────────────────────────────
+// Same property schema as POST https://api.endoflife.ai/v1/sbom?enrich=1
+// (spec: https://endoflife.ai/sbom-enrichment.json), minus risk scores, which
+// the Action does not compute (every matched line carries endoflife:scored=false).
+const ENRICH_NS = 'endoflife:';
+const ENRICH_ANNOTATOR = 'Tool: endoflife.ai eol-check';
+function enrichPairs(a) {
+  const pairs = [];
+  const put = (k, v) => { if (v !== undefined && v !== null && v !== '') pairs.push([ENRICH_NS + k, String(v)]); };
+  put('status', a.status); put('product', a.product); put('product_url', a.product_url); put('cycle', a.cycle);
+  put('eol_date', a.eol_date); put('days_until_eol', a.days_until_eol); put('days_past_eol', a.days_past_eol);
+  put('matched_by', a.matched_by); put('purl_matched', a.purl_matched); put('purl_type', a.purl_type);
+  if (a.eol_date_published === false) put('eol_date_published', 'false');
+  put('score_url', a.score_url);
+  if (a.reason) put('reason', a.reason);
+  if (a.scored === false) put('scored', 'false');
+  return pairs;
+}
+function enrichDoc(doc, r, summary) {
+  const now = new Date().toISOString();
+  const isOurs = (t) => t && (t.name === 'endoflife.ai eol-check' || t.vendor === 'endoflife.ai');
+  const docPairs = [
+    ['enriched_at', now], ['components', summary.components], ['matched', summary.matched], ['unique_products', summary.unique_products],
+    ['unique_lines', summary.unique_lines], ['past_eol', summary.past_eol], ['not_tracked', summary.not_tracked], ['gate', summary.gate],
+    ['gate_policy', summary.gate_policy], ['strict', 'false'], ['purl_map_generated', summary.purl_map_generated],
+    ['purl_map', 'https://endoflife.ai/purl-map.json'], ['docs', 'https://endoflife.ai/sbom-enrichment.json'],
+  ].filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k, v]) => [ENRICH_NS + k, String(v)]);
+  if (r.parsed.format === 'CycloneDX') {
+    r.parsed.components.forEach((c, i) => {
+      const node = c.ref, a = r.annotations[i]; if (!node || !a) return;
+      const kept = (Array.isArray(node.properties) ? node.properties : []).filter((p) => !(p && typeof p.name === 'string' && p.name.startsWith(ENRICH_NS)));
+      node.properties = kept.concat(enrichPairs(a).map(([name, value]) => ({ name, value })));
+    });
+    doc.metadata = doc.metadata && typeof doc.metadata === 'object' ? doc.metadata : {};
+    const md = doc.metadata;
+    md.properties = (Array.isArray(md.properties) ? md.properties : []).filter((p) => !(p && typeof p.name === 'string' && p.name.startsWith(ENRICH_NS))).concat(docPairs.map(([name, value]) => ({ name, value })));
+    const tool14 = { vendor: 'endoflife.ai', name: 'endoflife.ai eol-check', version: ACTION_VERSION };
+    const tool15 = { type: 'application', name: 'endoflife.ai eol-check', version: ACTION_VERSION, supplier: { name: 'endoflife.ai', url: ['https://endoflife.ai'] } };
+    if (Array.isArray(md.tools)) md.tools = md.tools.filter((t) => !isOurs(t)).concat([tool14]);
+    else if (md.tools && typeof md.tools === 'object') md.tools.components = (Array.isArray(md.tools.components) ? md.tools.components : []).filter((t) => !isOurs(t)).concat([tool15]);
+    else md.tools = parseFloat(String(doc.specVersion || '1.5')) >= 1.5 ? { components: [tool15] } : [tool14];
+    return doc;
+  }
+  const notOurs = (x) => !(x && x.annotator === ENRICH_ANNOTATOR);
+  r.parsed.components.forEach((c, i) => {
+    const node = c.ref, a = r.annotations[i]; if (!node || !a) return;
+    node.annotations = (Array.isArray(node.annotations) ? node.annotations : []).filter(notOurs)
+      .concat([{ annotationType: 'OTHER', annotator: ENRICH_ANNOTATOR, annotationDate: now, comment: enrichPairs(a).map(([k, v]) => k + '=' + v).join('; ') }]);
+  });
+  doc.annotations = (Array.isArray(doc.annotations) ? doc.annotations : []).filter(notOurs)
+    .concat([{ annotationType: 'OTHER', annotator: ENRICH_ANNOTATOR, annotationDate: now, comment: docPairs.map(([k, v]) => k + '=' + v).join('; ') }]);
+  return doc;
 }
 
 (async () => {
@@ -261,6 +328,7 @@ function checkSbomFile(file, text, products, purlLookup, nameLookup) {
   const failOn = input('fail-on', 'eol').toLowerCase();
   const warnDays = parseInt(input('warn-days', '90'), 10) || 90;
   const sbomInput = input('sbom', '');
+  const sbomOutput = input('sbom-output', '');
   const items = [];
 
   if (input('scan', 'true') !== 'false') items.push(...detect(root));
@@ -290,6 +358,27 @@ function checkSbomFile(file, text, products, purlLookup, nameLookup) {
         if (r.error) { annotate('error', `eol-check: ${f} is ${r.error}`, f); process.exitCode = 1; continue; }
         sbomComponents += r.components;
         sbomUnmatched.push(...r.unmatched);
+        if (sbomOutput) {
+          // One enriched document per input: a directory target gets <name>.enriched.<ext>,
+          // a file target is used as-is for a single input (suffixed for several).
+          let outPath = path.resolve(root, sbomOutput);
+          const isDir = sbomOutput.endsWith('/') || sbomOutput.endsWith('\\') || (fs.existsSync(outPath) && fs.statSync(outPath).isDirectory());
+          // sbom.cdx.json -> sbom.enriched.cdx.json (suffix goes before the first extension)
+          if (isDir) { const b = path.basename(f); outPath = path.join(outPath, b.includes('.') ? b.replace(/^([^.]+)/, '$1.enriched') : b + '.enriched.json'); }
+          else if (sbomFiles.length > 1) { const i = sbomFiles.indexOf(f); if (i > 0) { const b = path.basename(outPath); outPath = path.join(path.dirname(outPath), b.includes('.') ? b.replace(/^([^.]+)/, `$1.${i + 1}`) : `${b}.${i + 1}`); } }
+          const uniqProducts = new Set(r.results.map((x) => x.slug));
+          const eolLines = r.results.filter((x) => x.is_eol).length;
+          const soonest = r.results.filter((x) => !x.is_eol && x.days_until_eol != null).reduce((m, x) => (m == null || x.days_until_eol < m ? x.days_until_eol : m), null);
+          const gate = eolLines > 0 ? 'fail' : (soonest != null && soonest <= warnDays ? 'warn' : 'pass');
+          // r.doc is the object the annotations' refs point into (a fresh parse would be a different tree)
+          const enriched = enrichDoc(r.doc, r, {
+            components: r.components, matched: r.results.length, unique_products: uniqProducts.size, unique_lines: r.results.length,
+            past_eol: eolLines, not_tracked: r.unmatched.length, gate, gate_policy: `fail_on=${failOn}; warn_days=${warnDays}`,
+            purl_map_generated: loadScannerDb.generated,
+          });
+          try { fs.mkdirSync(path.dirname(outPath), { recursive: true }); fs.writeFileSync(outPath, JSON.stringify(enriched, null, 2) + '\n'); console.log(`eol-check: enriched SBOM written to ${path.relative(root, outPath)} (gate: ${gate})`); }
+          catch (e) { annotate('error', `eol-check: could not write ${outPath}: ${e.message}`); process.exitCode = 1; }
+        }
         for (const row of r.results) {
           const k = row.slug + ':' + row.version;
           if (seen.has(k)) continue;

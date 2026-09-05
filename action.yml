@@ -1,5 +1,5 @@
 name: 'EOL Check — end-of-life software gate'
-description: 'Fail CI when your stack runs end-of-life software. Auto-detects runtimes, Docker base images and SBOMs. Data: endoflife.ai.'
+description: 'Fail CI when your stack runs end-of-life software. Auto-detects runtimes, Docker base images and SBOMs; writes enriched SBOMs. Data: endoflife.ai.'
 author: 'endoflife.ai'
 branding:
   icon: 'alert-octagon'
@@ -16,6 +16,10 @@ inputs:
     default: 'true'
   sbom:
     description: 'Path(s) to CycloneDX or SPDX JSON SBOM files, comma-separated (e.g. "sbom.cdx.json" from Syft, Trivy or cdxgen). Components resolve by package URL (exact) against endoflife.ai/purl-map.json; untracked components are counted, never guessed. No API calls, no rate limit.'
+    required: false
+    default: ''
+  sbom-output:
+    description: 'Write each SBOM back out with lifecycle facts on every component (CycloneDX properties / SPDX annotations in the endoflife: namespace, same schema as the API - https://endoflife.ai/sbom-enrichment.json). A file path for one input, or a directory (trailing slash) for several: <name>.enriched.<ext>. Upload it to Dependency-Track, attach it to a release, or diff it between runs.'
     required: false
     default: ''
   fail-on:

@@ -31,6 +31,7 @@ jobs:
           scan: 'false'
           fail-on: 'never'
           sbom: 'fixtures/sbom.cdx.json, fixtures/sbom.spdx.json'
+          sbom-output: 'enriched/'
       - name: assert sbom
         run: |
           echo "eol=${{ steps.sbom.outputs.eol-count }} checked=${{ steps.sbom.outputs.checked-count }} components=${{ steps.sbom.outputs.sbom-components }} unmatched=${{ steps.sbom.outputs.unmatched-count }}"
@@ -38,6 +39,11 @@ jobs:
           test "${{ steps.sbom.outputs.checked-count }}" -ge 7
           test "${{ steps.sbom.outputs.sbom-components }}" -eq 11
           test "${{ steps.sbom.outputs.unmatched-count }}" -ge 2
+          test -f enriched/sbom.enriched.cdx.json
+          test -f enriched/sbom.enriched.spdx.json
+          grep -q '"endoflife:status"' enriched/sbom.enriched.cdx.json
+          grep -q '"endoflife:gate"' enriched/sbom.enriched.cdx.json
+          grep -q 'endoflife:status=' enriched/sbom.enriched.spdx.json
       # And prove the failure path actually fails.
       - id: mustfail
         uses: ./
