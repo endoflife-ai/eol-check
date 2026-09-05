@@ -1,0 +1,6 @@
+{"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","name":"fixture","packages":[
+ {"name":"webpack","SPDXID":"SPDXRef-1","versionInfo":"5.110.3","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceType":"purl","referenceLocator":"pkg:npm/webpack@5.110.3"}]},
+ {"name":"django","SPDXID":"SPDXRef-2","versionInfo":"4.2.16","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceType":"purl","referenceLocator":"pkg:pypi/Django@4.2.16"}]},
+ {"name":"openssl","SPDXID":"SPDXRef-3","versionInfo":"3.0.15","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceType":"purl","referenceLocator":"pkg:generic/openssl@3.0.15"}]},
+ {"name":"Ubuntu","SPDXID":"SPDXRef-4","versionInfo":"22.04"}
+]}

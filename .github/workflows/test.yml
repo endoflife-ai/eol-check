@@ -22,6 +22,22 @@ jobs:
           echo "eol=${{ steps.check.outputs.eol-count }} approaching=${{ steps.check.outputs.approaching-count }} checked=${{ steps.check.outputs.checked-count }}"
           test "${{ steps.check.outputs.eol-count }}" -ge 1
           test "${{ steps.check.outputs.checked-count }}" -ge 3
+      # SBOM mode: CycloneDX + SPDX fixtures (nodejs 16 + python 3.9 + django 4.2
+      # EOL; left-pad and the app itself untracked) — no API calls, one
+      # scanner-db download.
+      - id: sbom
+        uses: ./
+        with:
+          scan: 'false'
+          fail-on: 'never'
+          sbom: 'fixtures/sbom.cdx.json, fixtures/sbom.spdx.json'
+      - name: assert sbom
+        run: |
+          echo "eol=${{ steps.sbom.outputs.eol-count }} checked=${{ steps.sbom.outputs.checked-count }} components=${{ steps.sbom.outputs.sbom-components }} unmatched=${{ steps.sbom.outputs.unmatched-count }}"
+          test "${{ steps.sbom.outputs.eol-count }}" -ge 2
+          test "${{ steps.sbom.outputs.checked-count }}" -ge 7
+          test "${{ steps.sbom.outputs.sbom-components }}" -eq 11
+          test "${{ steps.sbom.outputs.unmatched-count }}" -ge 2
       # And prove the failure path actually fails.
       - id: mustfail
         uses: ./

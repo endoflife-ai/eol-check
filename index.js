@@ -5,7 +5,12 @@ const fs = require('fs');
 const path = require('path');
 
 const API = 'https://api.endoflife.ai/v1/status';
-const UA = 'eol-check-action/1.0 (+https://github.com/endoflife-ai/eol-check)';
+// SBOM mode resolves against the same static database the endoflife.ai Stack
+// Scanner uses (regenerated at every site build, checked by its cross-surface
+// gate) — one download, no per-component API calls, no rate limit, so a
+// 3,000-component SBOM costs the same as a 3-component one.
+const SCANNER_DB = 'https://endoflife.ai/scanner-db.json';
+const UA = 'eol-check-action/1.1 (+https://github.com/endoflife-ai/eol-check)';
 
 const input = (name, dflt) => {
   const v = process.env['INPUT_' + name.replace(/ /g, '_').toUpperCase()];
@@ -104,10 +109,158 @@ async function check(item) {
   }
 }
 
+// ── SBOM mode ────────────────────────────────────────────────────────────────
+// A CycloneDX or SPDX JSON document names components by package URL (purl).
+// Resolution is purl-first and exact: a component with a purl matches only if
+// endoflife.ai publishes that purl for a product (endoflife.ai/purl-map.json);
+// it is never guessed from the name. Components without a purl match by name
+// only when the name is exactly a tracked product's slug, display name or a
+// well-known image name. Everything else is reported as "not tracked" — a
+// count, never a verdict. The normaliser, cycle matcher and status rules are
+// the ones the Stack Scanner runs (endoflife.ai/scanner.js), kept identical.
+
+function normalisePurl(p) {
+  const s = String(p || '').trim();
+  const m = /^pkg:([A-Za-z0-9.+-]+)\/(.+)$/.exec(s);
+  if (!m) return null;
+  let rest = m[2];
+  const hash = rest.indexOf('#'); if (hash >= 0) rest = rest.slice(0, hash);
+  const q = rest.indexOf('?'); if (q >= 0) rest = rest.slice(0, q);
+  const at = rest.lastIndexOf('@');
+  if (at > 0 && rest[at - 1] !== '/') rest = rest.slice(0, at);
+  if (!rest || /^[/@]*$/.test(rest)) return null;
+  const type = m[1].toLowerCase();
+  let name = rest.replace(/%40/gi, '@');
+  if (type === 'pypi') name = name.replace(/_/g, '-');
+  return `pkg:${type}/${name}`.toLowerCase();
+}
+function purlVersion(p) {
+  const s = String(p || '').trim();
+  const m = /^pkg:[A-Za-z0-9.+-]+\/(.+)$/.exec(s);
+  if (!m) return null;
+  let rest = m[1];
+  const hash = rest.indexOf('#'); if (hash >= 0) rest = rest.slice(0, hash);
+  const q = rest.indexOf('?'); if (q >= 0) rest = rest.slice(0, q);
+  const at = rest.lastIndexOf('@');
+  if (at > 0 && rest[at - 1] !== '/') return decodeURIComponent(rest.slice(at + 1)) || null;
+  return null;
+}
+
+function parseSbom(doc) {
+  const comps = []; // {name, version, purl}
+  if (!doc || typeof doc !== 'object') return { error: 'not a JSON object' };
+  if (doc.bomFormat === 'CycloneDX' || Array.isArray(doc.components)) {
+    const walk = (list) => {
+      for (const c of list || []) {
+        if (!c || typeof c !== 'object') continue;
+        comps.push({ name: c.name || '', version: c.version || '', purl: c.purl || '' });
+        if (Array.isArray(c.components)) walk(c.components);
+      }
+    };
+    if (doc.metadata && doc.metadata.component) walk([doc.metadata.component]);
+    walk(doc.components);
+    return { format: 'CycloneDX', components: comps };
+  }
+  if (doc.spdxVersion || Array.isArray(doc.packages)) {
+    for (const p of doc.packages || []) {
+      if (!p || typeof p !== 'object') continue;
+      const ref = (p.externalRefs || []).find((r) => r && r.referenceType === 'purl' && r.referenceLocator);
+      comps.push({ name: p.name || '', version: p.versionInfo || '', purl: ref ? ref.referenceLocator : '' });
+    }
+    return { format: 'SPDX', components: comps };
+  }
+  return { error: 'not a CycloneDX or SPDX JSON document (no bomFormat/components or spdxVersion/packages)' };
+}
+
+// Exact cycle, else exact major.minor, else the bare major. No prefix
+// matching ("2.28" must never match "2.3") and no newest-cycle fallback.
+function findBestCycle(cycles, requestedVersion) {
+  if (!Array.isArray(cycles) || cycles.length === 0 || !requestedVersion) return null;
+  const v = String(requestedVersion).replace(/^v/i, '');
+  const parts = v.split('.');
+  const exact = cycles.find((c) => String(c.c) === v);
+  if (exact) return exact;
+  if (parts.length >= 2) {
+    const mm = parts[0] + '.' + parts[1];
+    const hit = cycles.find((c) => String(c.c) === mm);
+    if (hit) return hit;
+  }
+  return cycles.find((c) => String(c.c) === parts[0]) || null;
+}
+
+function daysUntil(dateStr) {
+  const t = Date.parse(dateStr + 'T00:00:00Z');
+  if (Number.isNaN(t)) return null;
+  const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+  return Math.round((t - today.getTime()) / 86400000);
+}
+
+async function loadScannerDb() {
+  const res = await fetch(SCANNER_DB, { headers: { 'User-Agent': UA } });
+  if (!res.ok) throw new Error(`scanner-db.json HTTP ${res.status}`);
+  const db = await res.json();
+  if (!db || !db.products || typeof db.products !== 'object') throw new Error('scanner-db.json: unexpected shape');
+  return db.products;
+}
+
+function buildNameLookup(products) {
+  const byName = {};
+  for (const slug in products) {
+    byName[slug.toLowerCase()] = slug;
+    const n = products[slug] && products[slug].name;
+    if (n) byName[String(n).toLowerCase()] = slug;
+  }
+  for (const img in IMAGE_SLUGS) if (products[IMAGE_SLUGS[img]]) byName[img] = IMAGE_SLUGS[img];
+  return byName;
+}
+function buildPurlLookup(products) {
+  const lookup = {};
+  for (const slug in products) for (const p of (products[slug] && products[slug].purl) || []) { const k = normalisePurl(p); if (k) lookup[k] = slug; }
+  return lookup;
+}
+
+// Returns {results: [...status-shaped rows], unmatched: [labels], components}
+function checkSbomFile(file, text, products, purlLookup, nameLookup) {
+  let doc;
+  try { doc = JSON.parse(text); } catch (e) { return { error: `not valid JSON (${e.message})` }; }
+  const parsed = parseSbom(doc);
+  if (parsed.error) return { error: parsed.error };
+  const results = [], unmatched = [], seen = new Set();
+  for (const c of parsed.components) {
+    let slug = null, how = null;
+    if (c.purl) { const k = normalisePurl(c.purl); slug = k && purlLookup[k] ? purlLookup[k] : null; how = 'purl'; }
+    else if (c.name) { slug = nameLookup[String(c.name).toLowerCase()] || null; how = 'name'; }
+    const label = c.purl || (c.name ? c.name + (c.version ? '@' + c.version : '') : '(unnamed component)');
+    if (!slug) { unmatched.push(label); continue; }
+    const version = (c.purl && purlVersion(c.purl)) || c.version || '';
+    const cycle = findBestCycle(products[slug].cycles, version);
+    if (!cycle) { unmatched.push(`${label} (version not tracked)`); continue; }
+    const key = slug + ':' + cycle.c;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // Status is what the build published (cycle.s), never re-derived from the
+    // eol boolean; a dated cycle also gets day counts from its date.
+    const dated = typeof cycle.eol === 'string' && /^\d{4}-\d{2}-\d{2}/.test(cycle.eol);
+    const days = dated ? daysUntil(cycle.eol.slice(0, 10)) : null;
+    const isEol = cycle.s === 'eol' || (days != null && days < 0);
+    results.push({
+      slug, version: String(cycle.c), file, component: label, matched_by: how,
+      is_eol: isEol,
+      eol_date: dated ? cycle.eol.slice(0, 10) : (cycle.eol === true ? null : null),
+      eol_unpublished: cycle.eol === true,
+      days_past_eol: isEol && days != null ? -days : null,
+      days_until_eol: !isEol && days != null ? days : null,
+      score_url: `https://endoflife.ai/score/${slug}/${cycle.c}`,
+    });
+  }
+  return { format: parsed.format, components: parsed.components.length, results, unmatched };
+}
+
 (async () => {
   const root = process.env.GITHUB_WORKSPACE || process.cwd();
   const failOn = input('fail-on', 'eol').toLowerCase();
   const warnDays = parseInt(input('warn-days', '90'), 10) || 90;
+  const sbomInput = input('sbom', '');
   const items = [];
 
   if (input('scan', 'true') !== 'false') items.push(...detect(root));
@@ -118,23 +271,55 @@ async function check(item) {
   const seen = new Set();
   const unique = items.filter((x) => { const k = x.slug + ':' + x.version; if (seen.has(k)) return false; seen.add(k); return true; });
 
-  if (!unique.length) {
-    console.log('eol-check: nothing detected to check (add the `products` input for manual pairs).');
+  // SBOM files: resolved locally against scanner-db.json (one download).
+  const sbomResults = [];
+  let sbomComponents = 0, sbomUnmatched = [];
+  const sbomFiles = sbomInput.split(',').map((s) => s.trim()).filter(Boolean);
+  if (sbomFiles.length) {
+    let products;
+    try { products = await loadScannerDb(); }
+    catch (e) { annotate('error', `eol-check: could not load endoflife.ai/scanner-db.json (${e.message}) — SBOM components not checked.`); process.exitCode = 1; products = null; }
+    if (products) {
+      const purlLookup = buildPurlLookup(products);
+      const nameLookup = buildNameLookup(products);
+      for (const f of sbomFiles) {
+        let text;
+        try { text = fs.readFileSync(path.resolve(root, f), 'utf8'); }
+        catch { annotate('error', `eol-check: SBOM file not found: ${f}`, f); process.exitCode = 1; continue; }
+        const r = checkSbomFile(f, text, products, purlLookup, nameLookup);
+        if (r.error) { annotate('error', `eol-check: ${f} is ${r.error}`, f); process.exitCode = 1; continue; }
+        sbomComponents += r.components;
+        sbomUnmatched.push(...r.unmatched);
+        for (const row of r.results) {
+          const k = row.slug + ':' + row.version;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          sbomResults.push(row);
+        }
+        console.log(`eol-check: ${f} (${r.format}) — ${r.components} components, ${r.results.length} tracked, ${r.unmatched.length} not tracked`);
+      }
+    }
+  }
+
+  if (!unique.length && !sbomResults.length) {
+    if (sbomComponents) console.log(`eol-check: ${sbomComponents} SBOM components, none tracked by endoflife.ai (nothing to verdict — never a guess).`);
+    else console.log('eol-check: nothing detected to check (add the `products` or `sbom` input).');
     return;
   }
 
-  const results = await Promise.all(unique.map(check));
+  const results = [...(await Promise.all(unique.map(check))), ...sbomResults];
   let eolCount = 0, approaching = 0;
   const rows = [];
   for (const r of results) {
     const label = `${r.slug} ${r.version}`;
     if (r.unknown) { annotate('notice', `eol-check: ${label} is not tracked by endoflife.ai — skipped.`, r.file); rows.push(`| ${label} | — | not tracked | ${r.file || 'input'} |`); continue; }
     if (r.error) { annotate('notice', `eol-check: ${label} lookup failed (${r.error}) — skipped.`, r.file); continue; }
-    const where = r.file || 'products input';
+    const where = r.component ? `${r.file} · ${r.component}` : (r.file || 'products input');
     if (r.is_eol) {
       eolCount++;
       const ago = r.days_past_eol != null ? ` (${r.days_past_eol} days ago)` : '';
-      annotate('error', `${label} is END OF LIFE${r.eol_date ? ` since ${r.eol_date}` : ''}${ago} — no more security fixes. ${r.score_url || ''}`, r.file);
+      const since = r.eol_date ? ` since ${r.eol_date}` : (r.eol_unpublished ? ' (vendor publishes no date)' : '');
+      annotate('error', `${label} is END OF LIFE${since}${ago} — no more security fixes. ${r.score_url || ''}`, r.file);
       rows.push(`| ${label} | 🔴 EOL | ${r.eol_date || '—'} | ${where} |`);
     } else if (r.days_until_eol != null && r.days_until_eol <= warnDays) {
       approaching++;
@@ -144,6 +329,10 @@ async function check(item) {
       rows.push(`| ${label} | 🟢 supported | ${r.eol_date || '—'} | ${where} |`);
     }
   }
+  if (sbomUnmatched.length) {
+    const sample = sbomUnmatched.slice(0, 5).join(', ');
+    annotate('notice', `eol-check: ${sbomUnmatched.length} SBOM component${sbomUnmatched.length === 1 ? '' : 's'} not tracked by endoflife.ai — no verdict, never a guess (e.g. ${sample}${sbomUnmatched.length > 5 ? ', …' : ''}).`);
+  }
 
   const report = [
     '### EOL Check',
@@ -152,11 +341,13 @@ async function check(item) {
     '|---|---|---|---|',
     ...rows,
     '',
-    `Data: [endoflife.ai](https://endoflife.ai) · ${results.length} checked · ${eolCount} EOL · ${approaching} approaching`,
+    `Data: [endoflife.ai](https://endoflife.ai) · ${results.length} checked · ${eolCount} EOL · ${approaching} approaching` +
+      (sbomComponents ? ` · SBOM: ${sbomComponents} components, ${sbomResults.length} tracked, ${sbomUnmatched.length} not tracked` : ''),
   ].join('\n');
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, report + '\n');
   if (process.env.GITHUB_OUTPUT) {
     const out = [`eol-count=${eolCount}`, `approaching-count=${approaching}`, `checked-count=${results.length}`,
+      `sbom-components=${sbomComponents}`, `unmatched-count=${sbomUnmatched.length}`,
       'report<<EOL_CHECK_EOF', report, 'EOL_CHECK_EOF'].join('\n') + '\n';
     fs.appendFileSync(process.env.GITHUB_OUTPUT, out);
   }

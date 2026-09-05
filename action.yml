@@ -1,5 +1,5 @@
 name: 'EOL Check — end-of-life software gate'
-description: 'Fail CI when your stack runs end-of-life software. Auto-detects runtimes and Docker base images. Data: endoflife.ai.'
+description: 'Fail CI when your stack runs end-of-life software. Auto-detects runtimes, Docker base images and SBOMs. Data: endoflife.ai.'
 author: 'endoflife.ai'
 branding:
   icon: 'alert-octagon'
@@ -14,6 +14,10 @@ inputs:
     description: 'Auto-detect versions from repo files (.nvmrc, .node-version, .python-version, .ruby-version, go.mod, package.json engines, Dockerfiles). "true" or "false".'
     required: false
     default: 'true'
+  sbom:
+    description: 'Path(s) to CycloneDX or SPDX JSON SBOM files, comma-separated (e.g. "sbom.cdx.json" from Syft, Trivy or cdxgen). Components resolve by package URL (exact) against endoflife.ai/purl-map.json; untracked components are counted, never guessed. No API calls, no rate limit.'
+    required: false
+    default: ''
   fail-on:
     description: 'When to fail the job: "eol" (something is past end of life), "approaching" (also fail when EOL is within warn-days), or "never" (report only).'
     required: false
@@ -29,7 +33,11 @@ outputs:
   approaching-count:
     description: 'Number of detected products reaching end of life within warn-days.'
   checked-count:
-    description: 'Total product/version pairs checked.'
+    description: 'Total product/version pairs checked (repo scan + products input + SBOM).'
+  sbom-components:
+    description: 'Total components read from the SBOM file(s), tracked or not.'
+  unmatched-count:
+    description: 'SBOM components endoflife.ai does not track (no verdict given).'
   report:
     description: 'Markdown report of every finding.'
 
