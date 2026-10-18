@@ -30,6 +30,10 @@ inputs:
     description: 'Warn (annotate) when a product reaches end of life within this many days.'
     required: false
     default: '90'
+  api-key:
+    description: 'Optional endoflife.ai API key (free, Starter or Pro; free keys at https://endoflife.ai/api#free-key). Pass it from a secret, e.g. secrets.ENDOFLIFE_API_KEY. With a key, repo and products checks query the live API; without one they resolve from the public endoflife.ai/scanner-db.json (no key, no rate limit), so no setup is needed.'
+    required: false
+    default: ''
 
 outputs:
   eol-count:

@@ -5,7 +5,8 @@ A zero-dependency GitHub Action that scans your repo for runtime versions
 engines, `Dockerfile` base images) — or reads your SBOM — and checks each
 one against [endoflife.ai](https://endoflife.ai). Anything past end of life fails the
 build with a file-anchored annotation; anything close gets a warning and a
-date. No API key, no configuration required.
+date. No API key, no configuration required: checks resolve from endoflife.ai's public
+scanner database, and an optional `api-key` input switches repo checks to the live API.
 
 ```yaml
 - uses: endoflife-ai/eol-check@v1
@@ -42,7 +43,7 @@ jobs:
 | `go.mod` (`go 1.x`) | Go |
 | `Dockerfile*` `FROM` images (root + 2 levels) | node, python, ruby, golang, php, nginx, postgres, mysql, mariadb, redis, mongo, alpine, debian, ubuntu |
 
-Anything else — databases, OSes, appliances, 500+ products — via the
+Anything else — databases, OSes, appliances, 600+ products — via the
 `products` input as `slug:version` pairs. Slugs are the path segments on
 endoflife.ai (e.g. [`endoflife.ai/postgresql`](https://endoflife.ai/postgresql) → `postgresql`).
 
@@ -66,8 +67,8 @@ endoflife.ai does not track are counted in the summary and get no verdict.
 ```
 
 SBOM mode makes **no API calls**: it downloads endoflife.ai's scanner
-database once (the same file the site's Stack Scanner uses, rebuilt nightly
-from vendor-verified data) and resolves locally, so a 3,000-component SBOM
+database once (the same file the site's Stack Scanner uses, rebuilt at every
+site build, at least daily) and resolves locally, so a 3,000-component SBOM
 costs the same as a 3-component one and never hits a rate limit. Versions
 resolve to the tracked release line (exact cycle, else major.minor, else
 major — never a prefix match, never a newest-cycle fallback).
@@ -115,6 +116,24 @@ release's assets.
 | `sbom-output` | `''` | Write the enriched SBOM(s) here — a file, or a directory with a trailing slash |
 | `fail-on` | `eol` | `eol` \| `approaching` \| `never` |
 | `warn-days` | `90` | Warn when EOL is within this many days |
+| `api-key` | `''` | Optional endoflife.ai API key, from a secret. With it, repo and `products` checks query the live API; without it they resolve locally (see below) |
+
+## API key (optional)
+
+Keyless calls to api.endoflife.ai end on 2026-11-16. This Action does not need
+a key: without one, repo-scan and `products` checks resolve from the public
+[scanner database](https://endoflife.ai/scanner-db.json), the same data and
+matching rules as SBOM mode, with no rate limit. To query the live API instead,
+add a key (free keys at [endoflife.ai/api](https://endoflife.ai/api#free-key)):
+
+```yaml
+- uses: endoflife-ai/eol-check@v1
+  with:
+    api-key: ${{ secrets.ENDOFLIFE_API_KEY }}
+```
+
+If the API rejects the key or rate-limits it, the Action falls back to the
+scanner database and says so in a notice; the job does not fail for that.
 
 ## Outputs
 
@@ -146,9 +165,9 @@ Show a live EOL status badge for any version you ship against:
 ## Data
 
 Lifecycle data comes from [endoflife.ai](https://endoflife.ai) — end-of-life
-dates for 500+ products, verified against vendor sources daily, with
-[EOL Risk Scores](https://endoflife.ai/risk-score) and a
-[free API](https://endoflife.ai/api). Underlying community dates from
+dates for 600+ products, each labelled with its source on the site, with
+[EOL Risk Scores](https://endoflife.ai/risk-score) and an
+[API](https://endoflife.ai/api) (free key, 150 requests a day). Underlying community dates from
 [endoflife.date](https://endoflife.date) (MIT).
 
 ## License

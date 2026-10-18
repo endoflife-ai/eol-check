@@ -1,5 +1,12 @@
 // eol-check — fail CI when the stack runs end-of-life software.
-// Zero dependencies; Node 20+. Data: https://api.endoflife.ai (free, no key).
+// Zero dependencies; Node 20+. Data: endoflife.ai.
+//
+// Without an API key every check resolves locally against the public
+// scanner-db.json (one download, no rate limit, no key): keyless calls to
+// api.endoflife.ai end on 2026-11-16, and this keeps every existing workflow
+// working unchanged. With the optional `api-key` input the repo-scan and
+// `products` checks call the live API instead (X-API-Key header); a 401, 403 or
+// 429 from the API falls back to the local database with a notice.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -10,8 +17,8 @@ const API = 'https://api.endoflife.ai/v1/status';
 // gate) — one download, no per-component API calls, no rate limit, so a
 // 3,000-component SBOM costs the same as a 3-component one.
 const SCANNER_DB = 'https://endoflife.ai/scanner-db.json';
-const UA = 'eol-check-action/1.2 (+https://github.com/endoflife-ai/eol-check)';
-const ACTION_VERSION = '1.2.0';
+const UA = 'eol-check-action/1.3 (+https://github.com/endoflife-ai/eol-check)';
+const ACTION_VERSION = '1.3.0';
 
 const input = (name, dflt) => {
   const v = process.env['INPUT_' + name.replace(/ /g, '_').toUpperCase()];
@@ -98,16 +105,40 @@ function detect(root) {
   return found.filter((x) => { const k = x.slug + ':' + x.version; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
-async function check(item) {
+// Live API check (only with an api-key). Returns {fallback: true} on 401/403/429 so
+// the caller can resolve the item locally instead of failing the job.
+async function check(item, apiKey) {
   const url = `${API}/${encodeURIComponent(item.slug)}/${encodeURIComponent(item.version)}`;
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': UA } });
+    const res = await fetch(url, { headers: { 'User-Agent': UA, 'X-API-Key': apiKey } });
     if (res.status === 404) return { ...item, unknown: true };
+    if (res.status === 401 || res.status === 403 || res.status === 429) return { ...item, fallback: true, status: res.status };
     if (!res.ok) return { ...item, error: `HTTP ${res.status}` };
     return { ...item, ...(await res.json()) };
   } catch (e) {
     return { ...item, error: String(e && e.message || e) };
   }
+}
+
+// Local check against scanner-db.json: the same cycle matcher and status rules as
+// SBOM mode (and the endoflife.ai Stack Scanner), so both modes give one verdict.
+function checkLocal(item, products) {
+  const p = products[item.slug];
+  if (!p) return { ...item, unknown: true };
+  const cycle = findBestCycle(p.cycles, item.version);
+  if (!cycle) return { ...item, unknown: true };
+  const dated = typeof cycle.eol === 'string' && /^\d{4}-\d{2}-\d{2}/.test(cycle.eol);
+  const days = dated ? daysUntil(cycle.eol.slice(0, 10)) : null;
+  const isEol = cycle.s === 'eol' || (days != null && days < 0);
+  return {
+    ...item, version: String(cycle.c),
+    is_eol: isEol,
+    eol_date: dated ? cycle.eol.slice(0, 10) : null,
+    eol_unpublished: cycle.eol === true,
+    days_past_eol: isEol && days != null ? -days : null,
+    days_until_eol: !isEol && days != null ? days : null,
+    score_url: `https://endoflife.ai/score/${item.slug}/${cycle.c}`,
+  };
 }
 
 // ── SBOM mode ────────────────────────────────────────────────────────────────
@@ -339,13 +370,17 @@ function enrichDoc(doc, r, summary) {
   const seen = new Set();
   const unique = items.filter((x) => { const k = x.slug + ':' + x.version; if (seen.has(k)) return false; seen.add(k); return true; });
 
+  const apiKey = input('api-key', '') || process.env.ENDOFLIFE_API_KEY || '';
+  if (apiKey) console.log(`::add-mask::${apiKey}`);
+  let dbProducts = null; // scanner-db.json, downloaded at most once
+
   // SBOM files: resolved locally against scanner-db.json (one download).
   const sbomResults = [];
   let sbomComponents = 0, sbomUnmatched = [];
   const sbomFiles = sbomInput.split(',').map((s) => s.trim()).filter(Boolean);
   if (sbomFiles.length) {
     let products;
-    try { products = await loadScannerDb(); }
+    try { products = dbProducts = await loadScannerDb(); }
     catch (e) { annotate('error', `eol-check: could not load endoflife.ai/scanner-db.json (${e.message}) — SBOM components not checked.`); process.exitCode = 1; products = null; }
     if (products) {
       const purlLookup = buildPurlLookup(products);
@@ -396,7 +431,30 @@ function enrichDoc(doc, r, summary) {
     return;
   }
 
-  const results = [...(await Promise.all(unique.map(check))), ...sbomResults];
+  // Repo-scan and `products` items: the live API with a key, else the local database.
+  const local = async () => {
+    if (!dbProducts) dbProducts = await loadScannerDb();
+    return dbProducts;
+  };
+  let checked = [];
+  try {
+    if (apiKey) {
+      checked = await Promise.all(unique.map((i) => check(i, apiKey)));
+      const fb = checked.filter((r) => r.fallback);
+      if (fb.length) {
+        annotate('notice', `eol-check: api.endoflife.ai answered HTTP ${fb[0].status} for the API key; ${fb.length} check(s) resolved from endoflife.ai/scanner-db.json instead. Check the key at https://endoflife.ai/api.`);
+        const db = await local();
+        checked = checked.map((r) => (r.fallback ? checkLocal({ slug: r.slug, version: r.version, file: r.file }, db) : r));
+      }
+    } else if (unique.length) {
+      const db = await local();
+      checked = unique.map((i) => checkLocal(i, db));
+    }
+  } catch (e) {
+    annotate('error', `eol-check: could not load endoflife.ai/scanner-db.json (${e.message}) — repo checks not run. Add an api-key input to use the API instead.`);
+    process.exitCode = 1;
+  }
+  const results = [...checked, ...sbomResults];
   let eolCount = 0, approaching = 0;
   const rows = [];
   for (const r of results) {
