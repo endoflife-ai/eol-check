@@ -43,7 +43,7 @@ jobs:
 | `go.mod` (`go 1.x`) | Go |
 | `Dockerfile*` `FROM` images (root + 2 levels) | node, python, ruby, golang, php, nginx, postgres, mysql, mariadb, redis, mongo, alpine, debian, ubuntu |
 
-Anything else — databases, OSes, appliances, 600+ products — via the
+Anything else — databases, OSes, appliances, 700+ products — via the
 `products` input as `slug:version` pairs. Slugs are the path segments on
 endoflife.ai (e.g. [`endoflife.ai/postgresql`](https://endoflife.ai/postgresql) → `postgresql`).
 
@@ -165,7 +165,7 @@ Show a live EOL status badge for any version you ship against:
 ## Data
 
 Lifecycle data comes from [endoflife.ai](https://endoflife.ai) — end-of-life
-dates for 600+ products, each labelled with its source on the site, with
+dates for 700+ products, each labelled with its source on the site, with
 [EOL Risk Scores](https://endoflife.ai/risk-score) and an
 [API](https://endoflife.ai/api) (free key, 150 requests a day). Underlying community dates from
 [endoflife.date](https://endoflife.date) (MIT).
