@@ -50,5 +50,5 @@ outputs:
     description: 'Markdown report of every finding.'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'index.js'
