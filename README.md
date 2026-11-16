@@ -120,7 +120,7 @@ release's assets.
 
 ## API key (optional)
 
-Keyless calls to api.endoflife.ai end on 2026-11-16. This Action does not need
+Keyless calls to api.endoflife.ai ended on 2026-11-16. This Action does not need
 a key: without one, repo-scan and `products` checks resolve from the public
 [scanner database](https://endoflife.ai/scanner-db.json), the same data and
 matching rules as SBOM mode, with no rate limit. To query the live API instead,
