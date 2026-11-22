@@ -12,7 +12,7 @@ scanner database, and an optional `api-key` input switches repo checks to the li
 - uses: endoflife-ai/eol-check@v1
 ```
 
-That's the whole integration. A fuller example:
+That's the whole integration. Useful? A star helps other teams find it. A fuller example:
 
 ```yaml
 name: EOL gate
